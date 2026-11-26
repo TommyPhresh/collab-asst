@@ -1,0 +1,95 @@
+# sets priorities and lays ground rules
+domains:
+  family: {rank: 1, people: people.yaml}
+  religion: {rank: 2}
+  friends: {rank: 3}
+  work: {rank: 4}
+  training: {rank: 5}
+  self: {rank: 6}
+  hobbies: {rank: 7}
+
+stakes:
+  tiers: {routine: 1, notable: 2, rare: 3, once_ever: 4}
+  closeness_modifier: {immediate: +1, close: 0, extended: -1}
+  resolution: [effective_tier_desc, domain_rank_asc]
+
+logistics:
+  prep: {min: 45m, max: 60m, plan_with: max}
+  commute:
+    bike: {min: 25m, max: 35m}
+    drive: {min: 15m, max: 20m}
+    default: bike
+    plan_with: max
+
+religion:
+  hard:
+    - {id: sunday_mass, when: "Sun 08:45", duration: 60m, tier: 3}
+  growth:
+    self_study: {weekly_min: TBD, preferred: "Sun after mass"}
+    involvement: {type: exploration, candidates: "parish/Polish community events"}
+
+sleep:
+  rule: derived
+  target: 8h
+  wake_at: "first_commitment - prep.max - commute(mode).max"
+  bedtime: "wake_at - target"
+  hard: true
+  observed: {normal_wake: "06:00", "earliest_wake": "03:45"}
+  early_session_warning: day_before
+
+work:
+  default: {start: "07:30", end: "16:30"}
+  window: {earliest_start: "07:00", latest_end: "17:00"}
+  emergency_end: "18:00"
+  late_threshold: "17:00"
+  late_days_per_week: {max: 1, on_exceed: pushback}
+  stance: "no discretionary sacrifice of personal time"
+  slack_log: true
+
+training:
+  source: coach_agent
+  import: training.jsonl
+  respects: [sleep, work.window]
+
+weekends:
+  shape: none
+  fill_policy: suggest_not_schedule
+
+friends:
+  nights_out:
+    cap: {count: 1, per: 2w, mode: soft}
+    end_by: "bedtime"
+    pre_commit: {drink_limit: TBD, ask: "on_creation"}
+  arc: new_friends
+
+self:
+  floors:
+    housework_mini: {per_week: 2, target: 3, duration: 20-30m}
+    housework_big: {per_week: 1, mode: best_effort, duration: 2-3h}
+    laundry: {per_week: 1}
+    reflection: {per_week: TBD}
+
+hobbies:
+  pool: [piano, woodworking, tinkering, fishing, hiking, camping, cooking, reading]
+  policy: best_effort
+  starvation_boost: {after_weeks: 2, weight_bonus: TBD}
+
+arcs:
+  - id: own_thing
+    type: exploration
+    budget:
+      floor: {sessions_per_week: 1, duration: 60m, outside_work: true}
+      opportunistic: {source: work.slack_log, credit: true}
+    review: weekly
+  - id: decathlon_trials
+    type: performance
+    target: {points: 7500}
+    current: {points: 6900}
+    owner: coach_agent
+  - id: new_friends
+    type: exploration
+    prefer_overlap: [hobbies, religion, training]
+  - id: dating
+    type: dormant
+    wake: {manual_confirm: true}
+
