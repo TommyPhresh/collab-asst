@@ -225,9 +225,9 @@ impl People {
     /// use collab_asst::config::people::People;
     ///
     /// let people = People::from_yaml(
-    ///    "close:\n
+    ///    "close:\n\
     ///       - {id: peter, role: grandfather, birthday: \"Jan 2\"}\n\
-    ///       - [id: ben, role: uncle, birthday: \"Dec 21\"}\n",
+    ///       - {id: ben, role: uncle, birthday: \"Dec 21\"}\n",
     /// ).unwrap();
     ///
     /// let soon = people.birthdays_between("Dec 20".parse().unwrap(), "Jan 5".parse().unwrap());

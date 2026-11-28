@@ -494,7 +494,7 @@ impl fmt::Display for Weekday {
 /// # Example
 ///
 /// ```
-/// use collab_asst::config::units::{Weekday, TimeOfDay};
+/// use collab_asst::config::units::{Weekday, WeeklyAt};
 ///
 /// let w: WeeklyAt = "sunday 08:45".parse().unwrap();
 /// assert_eq!(w.day, Weekday::Sun);
