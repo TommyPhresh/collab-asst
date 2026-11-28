@@ -132,7 +132,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             continue;
         }
 
-        let ch = src[start..].chars().next().expects("i < len, so a char exists");
+        let ch = src[start..].chars().next().expect("i < len, so a char exists");
         return Err(LexError::UnexpectedChar {
             ch,
             span: start..start + ch.len_utf8(),
@@ -182,7 +182,7 @@ mod tests {
             kinds("wake_at - target"),
             [
                 id("wake_at"), Minus,
-                id("target"),
+                id("target"), Eof,
             ]
         );
         assert_eq!(kinds("bedtime"), [id("bedtime"), Eof]);
@@ -216,7 +216,7 @@ mod tests {
     fn literal_errors_cover_entire_literal() {
         match lex("a - 7h30") {
             Err(LexError::BadDuration { span, .. }) => assert_eq!(span, 4..8),
-            other => panic!("other:?}"),
+            other => panic!("{other:?}"),
         }
         match lex("07:3 + a") {
             Err(LexError::BadTime { span, .. }) => assert_eq!(span, 0..4),

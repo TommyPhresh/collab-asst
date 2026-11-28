@@ -2,7 +2,8 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use config::life::{Domain, Life};
+mod config;
+use config::life::Life;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
