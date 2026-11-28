@@ -1,10 +1,28 @@
-//! **Deserialize** puts info into typed structs and identifies
-//! errors and/or unknown values.
-//! **Validate** cross-references and checks for unique ranks
+//! Typed loading and validation of `data/life.yaml`.
+//!
+//! Each top-level YAML section maps to one field of [`Life`].
+//! Types mirror file's structure.
+//!
+//! # Loading Steps
+//!
+//! 1. **Deserialize** puts info into typed structs and identifies
+//! errors and/or unknown values. Short-circuits at first error.
+//! 2. **Validate** cross-references and checks for unique ranks
 //! and repeated IDs/TBDs.
 //!
 //! Expression strings stay raw `Expr` strings and are compiled
-//! and checked elsewhere.
+//! and checked by `expr`. Paths in the file resolve relative to `data/`.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use collab_asst::config::life::Life;
+//!
+//! let loaded = Life::load("data/life.yaml".as_ref()).unwrap();
+//! for path in &loaded.tbds {
+//!     println!("still TBD: {path}");
+//! }
+//! ```
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -15,7 +33,19 @@ use thiserror::Error;
 use super::people::{People, PeopleError};
 use super::units::{Duration, DurationRange, TimeOfDay, WeeklyAt};
 
-/// Some value, can be left as `TBD` if undecided
+/// Some value, can be left as `TBD`.
+///
+/// `TBD` parses as `Setting::TBD`, everything else is `Setting<T>`.
+///
+/// ```
+/// use collab_asst::config::life::Setting;
+///
+/// let s: Setting<u8> = serde_yaml_ng::from_str("TBD").unwrap();
+/// assert!(s.is_tbd());
+/// let s: Setting<u8> = serde_yaml_ng::from_str("3").unwrap();
+/// assert_eq!(s.value(), Some(&3));
+/// assert!(serde_yaml_ng::from_str::<Setting<u8>>("tbd").is_err());
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum Setting<T> {
     Tbd,
@@ -37,7 +67,8 @@ impl<T> Setting<T> {
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Setting<T> {
     /// Exact string `TBD` becomes `Tbd`, else parsed as `T`.
-    /// Goes thru YAML for more built-in error handling
+    ///
+    /// Goes thru YAML for more specific error handling (`T`'s error).
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = serde_yaml_ng::Value::deserialize(d)?;
         if v.as_str() == Some("TBD") {
@@ -49,12 +80,16 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Setting<T> {
     }
 }
 
-/// Raw expression source to be dealt with later
+/// Raw source of config expression, i.e. `wake_at - target`.
+///
+/// Kept as text at load time, [`expr`](crate::expr) module handles it later.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(transparent)]
 pub struct Expr(pub String);
 
-/// Stakes tier rating
+/// How much an event matters.
+///
+/// Out of range numbers fail to load; valid ones from [`TierNames`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(try_from = "u8")]
 pub struct Tier(u8);
@@ -76,6 +111,7 @@ impl TryFrom<u8> for Tier {
     }
 }
 
+/// Which end of a min/max range the planner uses for planning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Bound {
@@ -83,6 +119,7 @@ pub enum Bound {
     Max,
 }
 
+/// Duration range as a `{min,max}` map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MinMax {
@@ -90,6 +127,7 @@ pub struct MinMax {
     pub max: Duration,
 }
 
+/// Strictness on limits/floors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Enforcement {
@@ -98,6 +136,10 @@ pub enum Enforcement {
     BestEffort,
 }
 
+/// `data/life.yaml` rulebook, with one field per top-level section.
+///
+/// Built with [`Life::load`] (file + people) or [`Life::from_yaml`](text).
+/// Both run [`Life::validate`], so a successful build guarantees a valid build.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Life {
@@ -116,6 +158,7 @@ pub struct Life {
     pub arcs: Vec<Arc>,
 }
 
+/// Area of life that events and goals belong to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Domain {
     Family,
@@ -157,7 +200,9 @@ impl fmt::Display for Domain {
     }
 }
 
-/// Domain fields raise parse errors if misspelled or unknown
+/// Rank and settings for each [`Domain`].
+///
+/// One field per domain. Ranks must be exactly 1-7.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Domains {
@@ -185,12 +230,14 @@ impl Domains {
     }
 }
 
+/// General domain settings.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DomainCfg {
     pub rank: u8,
 }
 
+/// Family domain-specific settings.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FamilyDomain {
@@ -198,6 +245,7 @@ pub struct FamilyDomain {
     pub people: PathBuf,
 }
 
+/// Conflict resolution between events.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Stakes {
@@ -206,6 +254,7 @@ pub struct Stakes {
     pub resolution: Vec<ResolutionKey>,
 }
 
+/// Event tiers in increasing order.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TierNames {
@@ -215,6 +264,7 @@ pub struct TierNames {
     pub once_ever: Tier,
 }
 
+/// Tier adjustment applied by closeness. 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClosenessModifier {
@@ -223,6 +273,7 @@ pub struct ClosenessModifier {
     pub extended: i8,
 }
 
+/// One comparison step while resolving conflicts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolutionKey {
@@ -230,6 +281,7 @@ pub enum ResolutionKey {
     DomainRankAsc,
 }
 
+/// TIme spent getting ready or traveling.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Logistics {
@@ -237,6 +289,7 @@ pub struct Logistics {
     pub commute: Commute,
 }
 
+/// A min/max duration, as well as which to use when planning.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlannedRange {
@@ -245,7 +298,10 @@ pub struct PlannedRange {
     pub plan_with: Bound,
 }
 
-/// `default` and `plan_with` are required
+/// Travel modes and their durations.
+///
+/// `default` and `plan_with` are fixed keys; all others are mapped
+/// to a [`MinMax`]. 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Commute {
     pub default: String,
@@ -254,6 +310,7 @@ pub struct Commute {
     pub modes: HashMap<String, MinMax>,
 }
 
+/// Fixed religious commitments and goals.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Religion {
@@ -261,6 +318,7 @@ pub struct Religion {
     pub growth: ReligionGrowth,
 }
 
+/// Recurring commitment planner cannot schedule over.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HardBlock {
@@ -300,6 +358,7 @@ pub enum GoalKind {
     Dormant,
 }
 
+/// Sleep rules.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sleep {
@@ -331,6 +390,10 @@ pub enum WarningLead {
     DayBefore,
 }
 
+/// Work hours and limits on staying late.
+///
+/// Validation requires `earliest_start <= default.start
+/// < default.end <= latest_end <= late_threshold <= emergency_end`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Work {
@@ -350,6 +413,7 @@ pub struct WorkDefault {
     pub end: TimeOfDay,
 }
 
+/// Widest normal (non-late) workday.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkWindow {
@@ -372,6 +436,7 @@ pub enum OnExceed {
     Block,
 }
 
+/// Training sessions from coach.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Training {
@@ -383,6 +448,7 @@ pub struct Training {
     pub respects: Vec<String>,
 }
 
+/// How weekends are handled.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Weekends {
@@ -403,6 +469,7 @@ pub enum FillPolicy {
     Schedule,
 }
 
+/// Socialization.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Friends {
@@ -441,12 +508,14 @@ pub enum AskWhen {
     Never,
 }
 
+/// housework, laundry, etc.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelfCare {
     pub floors: HashMap<String, Floor>,
 }
 
+/// Recurring minimum.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Floor {
@@ -459,6 +528,7 @@ pub struct Floor {
     pub mode: Option<Enforcement>,
 }
 
+/// Scheduled when there's room, allowed to starve if no time.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hobbies {
@@ -467,6 +537,7 @@ pub struct Hobbies {
     pub starvation_boost: StarvationBoost,
 }
 
+/// Boosts hobbies who haven't been touched in a while.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StarvationBoost {
@@ -474,7 +545,11 @@ pub struct StarvationBoost {
     pub weight_bonus: Setting<f32>,
 }
 
-/// Only cross-kind tag is `type`, allowing individual kind fields
+/// Some long-running goal.
+///
+/// Each kind accepts only its own fields;
+/// the only cross-kind tag is `type`,
+/// allowing individual kind fields for rest.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Arc {
@@ -537,18 +612,21 @@ pub enum Review {
     Monthly,
 }
 
+/// Decathlon score goal.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Points {
     pub points: u16,
 }
 
+/// How a dormant arc becomes activated.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Wake {
     pub manual_confirm: bool,
 }
 
+/// Why `data/life.yaml` failed to load.
 #[derive(Debug, Error)]
 pub enum LifeError {
     #[error("reading {path}: {source}")]
@@ -566,7 +644,7 @@ pub enum LifeError {
     People(#[from] PeopleError),
 }
 
-/// Validation failure showing why
+/// Validation failure showing why with a path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Problem {
     pub at: String,

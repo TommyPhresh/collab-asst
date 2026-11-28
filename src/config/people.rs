@@ -1,15 +1,55 @@
-//! People and their closeness levels from `people.yaml`
+//! Every person the scheduler considers.
 //!
-//! Ids (names) must be unique across all levels.
+//! Closeness helps resolve conflicts, and will be used later.
+//!
+//! # File Format
+//!
+//! `data/people.yaml` has up to 3 top-level lists, one per closeness bucket.
+//! Each entry is in form `{id, role, birthday}`
+//!
+//! ```yaml
+//! immediate:
+//!   - {id: keaton, role: brother, birthday: "Oct 17"}
+//! close:
+//!   - {id: peter, role: grandfather, birthday: "Jan 2"}
+//! extended:
+//!   - {id: tom, role: uncle}
+//! ```
+//!
+//! Rules are enforced at load time.
+//!
+//! - Ids are unique across **all** buckets.
+//! - `role` is one of `Role` variants in `snake_case`.
+//! - `birthday` follows [`MonthDay`] syntax.
+//! - No other keys allowed, missing treated as empty.
+//!
+//! Ids are matched exactly and expected to be lowercase.
+//!
+//! # Example
+//!
+//! ```
+//! use collab_asst::config::people::{Closeness, People};
+//!
+//! let people = People::from_yaml(
+//!     "immediate:\n  - {id: keaton, role: brother}\n\
+//!      extended:\n  - {id: tom, role: uncle}\n",
+//! ).unwrap();
+//! assert_eq!(people.closeness("keaton"), Some(Closeness::Immediate));
+//! assert_eq!(people.closeness("tom"), Some(Closeness::Extended));
+//! assert_eq!(people.closeness("nemo"), None);
+//! ```
 
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
+
 use super::units::MonthDay;
 
-/// Closeness levels
+/// How close a person is.
+///
+/// Ordered closest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Closeness {
     Immediate,
@@ -27,6 +67,11 @@ impl fmt::Display for Closeness {
     }
 }
 
+/// Person's family relationship.
+///
+/// Informational, since closeness is independent of role.
+///
+/// Spelled in `snake_case` in YAML. Must be one of the defined variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -43,6 +88,9 @@ pub enum Role {
     Cousin,
 }
 
+/// One entry in `data/people.yaml`.
+///
+/// Doesn't store its own `Closeness`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Person {
@@ -52,7 +100,7 @@ pub struct Person {
     pub birthday: Option<MonthDay>,
 }
 
-/// `people.yaml` on-disk shape
+/// `people.yaml` on-disk shape before indexing.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPeople {
@@ -64,18 +112,25 @@ struct RawPeople {
     extended: Vec<Person>,
 }
 
+/// Person and their closeness bucket.
 #[derive(Debug, Clone)]
 struct Entry {
     closeness: Closeness,
     person: Person,
 }
 
-/// Index of all people by `id`
+/// Index of all people by `id`.
+///
+/// Built with [`People::load`] or [`People::from_yaml`].
+/// A successful build guarantees unique IDs and bucketed people.
+///
+/// Lookups are `O(1)` but order is random since `HashMap`.
 #[derive(Debug, Clone)]
 pub struct People {
     by_id: HashMap<String, Entry>,
 }
 
+/// Why `data/people.yaml` didn't load.
 #[derive(Debug, Error)]
 pub enum PeopleError {
     #[error("reading {path}: {source}")]
@@ -95,6 +150,12 @@ pub enum PeopleError {
 }
 
 impl People {
+    /// Reads and indexes `data/people.yaml` from file.
+    ///
+    /// `path` is used as given.
+    /// # Errors
+    ///
+    /// [`PeopleError::Io`] if file can't be read.
     pub fn load(path: &Path) -> Result<Self, PeopleError> {
         let text = std::fs::read_to_string(path).map_err(|source| PeopleError::Io {
             path: path.to_owned(),
@@ -103,11 +164,21 @@ impl People {
         Self::from_yaml(&text)
     }
 
+    /// Parses and indexes `people.yaml` from string.
+    ///
+    /// # Errors
+    ///
+    /// [`PeopleError::Yaml`] if text doesn't match file format,
+    /// [`PeopleError::DuplicateId`] if id repeats.
     pub fn from_yaml(s: &str) -> Result<Self, PeopleError> {
         let raw: RawPeople = serde_yaml_ng::from_str(s)?;
         Self::from_raw(raw)
     }
 
+    /// Builds index from parsed buckets in closeness order.
+    ///
+    /// Since buckets are processed closest first, `DuplicateId`
+    /// errors short-circuit in closeness order.
     fn from_raw(raw: RawPeople) -> Result<Self, PeopleError> {
         let buckets = [
             (Closeness::Immediate, raw.immediate),
@@ -146,7 +217,23 @@ impl People {
         self.by_id.get(id).map(|e| e.closeness)
     }
 
-    /// Retrieves all people whose birthday falls in defined range
+    /// Retrieves all people whose birthday falls in defined range in birthday order.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use collab_asst::config::people::People;
+    ///
+    /// let people = People::from_yaml(
+    ///    "close:\n
+    ///       - {id: peter, role: grandfather, birthday: \"Jan 2\"}\n\
+    ///       - [id: ben, role: uncle, birthday: \"Dec 21\"}\n",
+    /// ).unwrap();
+    ///
+    /// let soon = people.birthdays_between("Dec 20".parse().unwrap(), "Jan 5".parse().unwrap());
+    /// let ids: Vec<_> = soon.iter().map(|p| p.id.as_str()).collect();
+    /// assert_eq!(ids, ["ben", "peter"]);
+    /// ```
     pub fn birthdays_between(&self, from: MonthDay, to: MonthDay) -> Vec<&Person> {
         let mut hits: Vec<(&Person, MonthDay)> = self
             .by_id

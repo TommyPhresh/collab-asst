@@ -1,9 +1,8 @@
-mod config;
 
 use std::path::Path;
 use std::process::ExitCode;
 
-use config::life::Life;
+use config::life::{Domain, Life};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();

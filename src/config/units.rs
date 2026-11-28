@@ -1,17 +1,53 @@
-//! Config unit types
+//! Value types for literals in the config datafiles.
 //!
-//! Every type parses through `FromStr` and goes into serde with
-//! `#[serde(try_from = "String")]`. `Display` emits the shortest
-//! form; this means `s.parse::<T>()?.to_string()` is a round trip.
+//! | Type | Example Input | Meaning |
+//! | --- | --- | --- |
+//! | [`Duration`] | `45m`, `1h30m`, `2w` | non-negative length of time |
+//! | [`TimeOfDay`] | `07:30` | clock time without date; 24-hr clock |
+//! | [`DurationRange`] | `20-30m`, `45m-1h` | inclusive min..=max duration |
+//! | [`WeeklyAt`] | `sun 08:45` | some time on some weekday every week |
+//! | [`MonthDay`] | `Feb 17` | calendar date without year |
 //!
-//! `TimeOfDay` does no math intentionally; crossing into the next
-//! day is a different module's job.
+//! # Design
+//!
+//! - **Parsing is in [`FromStr`].** Each type implements `TryFrom<String>`
+//! and is decorated with `#[serde(try_from = "String")]`, so serde is the
+//! YAML-independent parser for everything.
+//! - **Invalid values cannot be constructed at all.** Type fields are private,
+//! and can therefore only be 'reached' thru parsers or the validated constructors.
+//! This means that a `DurationRange` existing proves its `min <= max` is true.
+//! - **[`Display`](fmt::Display) prints canonical form.** Canonical form always
+//! parses to same value. Non-canonical yet valid input parses fine but gets
+//! converted to canonical form (i.e. `90m` goes to `1h30m`).
+//! - **There is no date math anywhere.** [`TimeOfDay`] and [`MonthDay`] don't
+//! have `+` or `-`. Crossing midnight needs dates, not just times, so some other
+//! module will handle it.
+//!
+//! # Example
+//!
+//! ```
+//! use collab_asst::config::units::{Duration, DurationRange, TimeOfDay};
+//!
+//! let d: Duration = "1h30m".parse().unwrap();
+//! assert_eq!(d.minutes(), 90);
+//! assert_eq!("90m".parse::<Duration>().unwrap().to_string(), "1h30m");
+//!
+//! let t: TimeOfDay = "07:30".parse().unwrap();
+//! assert_eq!((t.hour(), t.minute()), (7,30));
+//!
+//! assert!("30-20m".parse::<DurationRange>().is_err());
+//! ```
 
 use std::fmt;
 use std::str::FromStr;
 use serde::Deserialize;
 use thiserror::Error;
 
+/// Reveals why unit literal failed to parse/construct.
+///
+/// Variants with a `String` carry the entire bad input.
+/// Callers with context on input's source (i.e. config path or expression span)
+/// add context themselves.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum UnitError {
     #[error("empty value")]
@@ -48,20 +84,55 @@ pub enum UnitError {
     DayOutOfRange { month: Month, day: u32 },
 }
 
+/// Some non-negative length of time in minutes.
+///
+/// # Syntax
+///
+/// One or more `<number><unit>` components without spaces.
+/// Units must be strictly descending and only appear once.
+/// Units are `w`,`d`,`h`,`m` for weeks, days, hours, minutes respectively.
+///
+/// | Accepted | Rejected |
+/// | --- | --- |
+/// | `45m`, `8h`, `2w` | `45`, `45x` |
+/// | `1h30m`, `1w2d3h4m` | `30m1h`, `1h1h` |
+/// | `0m` | `-5m`, `1h 30m` `""` |
+///
+/// Total minutes must fit into a `u32`, otherwise [`UnitError::Overflow`].
+///
+/// Seconds are not supported because that's too anal.
+///
+/// # Example
+/// 
+/// ```
+/// use collab_asst::config::units::Duration;
+///
+/// let d: Duration = "1w2d".parse().unwrap();
+/// assert_eq!(d.minutes(), 9*24*60);
+/// assert_eq!(d.to_string(), "1w2d");
+/// assert!("30m1h".parse::<Duration>().is_err());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(try_from = "String")]
 pub struct Duration(u32);
+
+/// Duration units go largest to smallest.
+///
+/// Descending order is relied upon by parser and `Display`.
 const UNITS: [(char,u32); 4] = [('w', 7*24*60), ('d', 24*60), ('h', 60), ('m', 1)];
+
 impl Duration {
     pub const ZERO: Duration = Duration(0);
+    /// Builds `Duration` from minute count only
     pub const fn from_minutes(minutes: u32) -> Self {
         Duration(minutes)
     }
+    /// Total duration length in minutes
     pub const fn minutes(self) -> u32 {
         self.0
     }
 }
-
+/// Where in [`UNITS`] unit suffix is or `None`
 fn unit_index(c: char) -> Option<usize> {
     UNITS.iter().position(|&(u,_)| u==c)
 }
@@ -69,6 +140,16 @@ fn unit_index(c: char) -> Option<usize> {
 impl FromStr for Duration {
     type Err = UnitError;
 
+    /// Parses `(DIGITS_UNIT)+` as long as units are strictly descending.
+    ///
+    /// # Errors
+    ///
+    /// [`Empty`](UnitError::Empty),
+    /// [`BadNumber`](UnitError::BadNumber),
+    /// [`MissingUnit`](UnitError::MissingUnit),
+    /// [`UnknownUnit`](UnitError::UnknownUnit),
+    /// [`UnitOrder`](UnitError::UnitOrder),
+    /// [`Overflow`](UnitError::Overflow).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.is_empty() {
             return Err(UnitError::Empty);
@@ -133,11 +214,36 @@ impl TryFrom<String> for Duration {
     }
 }
 
+/// Clock time with no date, 24-hour format.
+///
+/// Stored as minutes since midnight in form `HH:MM`.
+///
+/// # No math
+///
+/// `TimeOfDay` has no `Add`/`Sub` capabilities implemented, these
+/// are saved for a different module.
+///
+/// # Example
+///
+/// ```
+/// use collab_asst::config::units::TimeOfDay;
+///
+/// let t: TimeOfDay = "03:45".parse().unwrap();
+/// assert_eq!(t.minutes_since_midnight(), 225);
+/// assert!("24:00".parse::<TimeOfDay>().is_err());
+/// assert!("7:30".parse::<TimeOfDay>().is_err());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(try_from = "String")]
 pub struct TimeOfDay(u16);
 
 impl TimeOfDay {
+    /// Creates time from an hour in (`0..=23`) and a minute in (`0..=59`).
+    ///
+    /// # Errors
+    ///
+    /// [`HourOutOfRange`](UnitError::HourOutOfRange),
+    /// [`MinuteOutOfRange`](UnitError::MinuteOutOfRange).
     pub fn new(hour: u32, minute: u32) -> Result<Self, UnitError> {
         if hour > 23 {
             return Err(UnitError::HourOutOfRange(hour.to_string()));
@@ -164,6 +270,14 @@ impl TimeOfDay {
 impl FromStr for TimeOfDay {
     type Err = UnitError;
 
+    /// Parses from form `HH:MM`.
+    ///
+    /// # Errors
+    ///
+    /// [`Empty`](UnitError::Empty),
+    /// [`BadTime`](UnitError::BadTime) for bad shape,
+    /// [`HourOutOfRange`](UnitError::HourOutOfRange) or
+    /// [`MinuteOutOfRange`](UnitError::MinuteOutOfRange) for impossible values.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.is_empty() {
             return Err(UnitError::Empty);
@@ -193,6 +307,33 @@ impl TryFrom<String> for TimeOfDay {
     }
 }
 
+/// Inclusive range of durations `min..=max` with `min <= max` guaranteed.
+///
+/// # Syntax
+///
+/// One of two forms differing on the first `-`
+///
+/// - **Shared unit**: naked number, then one duration unit, i.e. `20-30m`.
+/// Duration unit applies to both `min` and `max`.
+/// - **Multi-unit**: `min` and `max` both have units, i.e. `45m-1h`.
+///
+/// Illegal variants are `20m-30` (unit must be at least on `max`),
+/// `20-1h30m` (multi-unit on `max` requires unit on `min`),
+/// `30-20m` (`min` must be `<= max`),
+/// `-30m` (no negatives),
+/// `20-` (need both `min` and `max`).
+///
+/// Side note: `30-30m` is LEGAL.
+///
+/// # Example
+///
+/// ```
+/// use collab_asst::config::units::DurationRange;
+///
+/// let r: DurationRange = "45m-1h".parse().unwrap();
+/// assert_eq!((r.min().minutes(), r.max().minutes()), (45,60));
+/// assert_eq!(r.to_string(), "45-60m");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(try_from = "String")]
 pub struct DurationRange {
@@ -201,6 +342,11 @@ pub struct DurationRange {
 }
 
 impl DurationRange {
+    /// Constructs `DurationRange`.
+    ///
+    /// # Errors
+    ///
+    /// [`RangeInverted`](UnitError::RangeInverted)
     pub fn new(min: Duration, max: Duration) -> Result<Self, UnitError> {
         if min > max {
             return Err(UnitError::RangeInverted {min, max });
@@ -219,6 +365,15 @@ impl DurationRange {
 
 impl FromStr for DurationRange {
     type Err = UnitError;
+
+    /// Parses either form of [`DurationRange`].
+    ///
+    /// # Errors
+    ///
+    /// [`Empty`](UnitError::Empty),
+    /// [`BadRange`](UnitError::BadRange) for bad shape,
+    /// any [`Duration`] error that propagates,
+    /// [`RangeInverted`](UnitError::RangeInverted).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.is_empty() {
             return Err(UnitError::Empty);
@@ -244,6 +399,9 @@ impl FromStr for DurationRange {
 }
 
 impl fmt::Display for DurationRange {
+    /// Canonical form is the one with the unit only on `max`.
+    /// Which unit is determined as the largest unit both sides
+    /// divied evenly into.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (a,b) = (self.min.minutes(), self.max.minutes());
         let &(u,per) = UNITS
@@ -264,6 +422,10 @@ impl TryFrom<String> for DurationRange {
     }
 }
 
+/// Day of the week, but Monday is first (as is correct).
+///
+/// Parses case-insensitively from either 3-letter or full names.
+/// Displays as lowercase 3-letter name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Weekday {
     Mon,
@@ -301,6 +463,12 @@ impl Weekday {
 
 impl FromStr for Weekday {
     type Err = UnitError;
+
+    /// Case-insensitive, accepts either 3-letter or full names.
+    ///
+    /// # Errors
+    ///
+    /// [`UnknownWeekday`](UnitError::UnknownWeekday) for any invalid input.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let lower = s.to_ascii_lowercase();
         Weekday::ALL
@@ -317,6 +485,21 @@ impl fmt::Display for Weekday {
     }
 }
 
+/// A recurring weekly time. Consists of a [`Weekday`] and a [`TimeOfDay`].
+///
+/// # Syntax
+///
+/// `<Weekday> HH:MM`. Exactly one ASCII space as separator.
+///
+/// # Example
+///
+/// ```
+/// use collab_asst::config::units::{Weekday, TimeOfDay};
+///
+/// let w: WeeklyAt = "sunday 08:45".parse().unwrap();
+/// assert_eq!(w.day, Weekday::Sun);
+/// assert_eq!(w.to_string(), "sun 08:45");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(try_from = "String")]
 pub struct WeeklyAt {
@@ -326,6 +509,14 @@ pub struct WeeklyAt {
 
 impl FromStr for WeeklyAt {
     type Err = UnitError;
+
+    /// Parses `<Weekday> HH:MM`.
+    ///
+    /// # Errors
+    ///
+    /// [`Empty`](UnitError::Empty),
+    /// [`BadWeekly`](UnitError::BadWeekly) if no space,
+    /// any [`Weekday`] or [`TimeOfDay`] parse error that propagates.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.is_empty() {
             return Err(UnitError::Empty);
@@ -353,6 +544,10 @@ impl TryFrom<String> for WeeklyAt {
     }
 }
 
+/// A month of the year.
+///
+/// Parses case-insensitively from either 3-letter or full name.
+/// Canonical form is the capitalized 3-letter name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Month {
     Jan,
@@ -400,6 +595,12 @@ impl Month {
 
 impl FromStr for Month {
     type Err = UnitError;
+
+    /// Case-insensitive, accepting either 3-letter or full name.
+    ///
+    /// # Errors
+    ///
+    /// [`UnknownMonth`](UnitError::UnknownMonth) for an illegal name.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Month::ALL
             .iter()
@@ -415,6 +616,33 @@ impl fmt::Display for Month {
     }
 }
 
+/// A calendar date without year.
+///
+/// # Syntax
+///
+/// `<Month> <day>` with exactly one ASCII space and day as either 1 or 2 digits.
+/// Day must exist in that month in *some* year (i.e. `Feb 29` parses).
+/// Must be month-date format AND not include any date suffixes (like 'st').
+///
+/// # Ordering
+///
+/// Calendar order within one year is preserved. Ranges that cross the New Year
+/// need [`MonthDay::within`] not `<=`.
+///
+/// # Leap Days
+///
+/// [`MonthDay::observed_in`] maps `Feb 29` to `Feb 28` in non-leap years.
+///
+/// # Example
+///
+/// ```
+/// use collab_asst::config::units::MonthDay;
+///
+/// let bday: MonthDay = "Jan 2".parse().unwrap();
+/// let from: MonthDay = "Dec 20".parse().unwrap();
+/// let to: MonthDay = "Jan 5".parse().unwrap();
+/// assert!(bday.within(from,to));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(try_from = "String")]
 pub struct MonthDay {
@@ -423,6 +651,12 @@ pub struct MonthDay {
 }
 
 impl MonthDay {
+    /// Constructs and validates `MonthDay`.
+    ///
+    /// # Errors
+    ///
+    /// [`DayOutOfRange`](UnitError::DayOutOfRange) for invalid days
+    /// for the month in question.
     pub fn new(month: Month, day: u32) -> Result<Self, UnitError> {
         if day == 0 || day > month.max_days() {
             return Err(UnitError::DayOutOfRange {month, day});
@@ -438,6 +672,7 @@ impl MonthDay {
         self.day as u32
     }
 
+    /// Converts `Feb 29` if not a leap year.
     pub fn observed_in(self, year: i32) -> MonthDay {
         let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
         if self.month == Month::Feb && self.day == 29 && !leap {
@@ -447,6 +682,8 @@ impl MonthDay {
         }
     }
 
+    /// Whether `self` is in `from...=to` inclusive.
+    /// If `from >= to`, assumes year wrapping.
     pub fn within(self, from: MonthDay, to: MonthDay) -> bool {
         if from <= to {
             from <= self && self <= to
@@ -458,6 +695,15 @@ impl MonthDay {
 
 impl FromStr for MonthDay {
     type Err = UnitError;
+
+    /// Parses `<Month> <day>`.
+    ///
+    /// # Errors
+    ///
+    /// [`Empty`](UnitError::Empty),
+    /// [`BadMonthDay`](UnitError::BadMonthDay) if bad shape,
+    /// [`UnknownMonth`](UnitError::UnknownMonth),
+    /// [`DayOutOfRange`](UnitError::DayOutOfRange).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.is_empty() {
             return Err(UnitError::Empty);
